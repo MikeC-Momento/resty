@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -602,6 +604,30 @@ func TestLoadBalancerRequestFailures(t *testing.T) {
 	}
 	assertEqual(t, 3, ts1URL)
 	assertEqual(t, 7, ts2URL)
+}
+
+func TestLoadBalancerConnectionRefusedMarksHostInactive(t *testing.T) {
+	ts := createGetServer(t)
+	ts.Close()
+
+	wrr, err := NewWeightedRoundRobin(time.Second, &Host{BaseURL: ts.URL, Weight: 1, MaxFailures: 1})
+	assertNil(t, err)
+	defer wrr.Close()
+
+	c := dcnl()
+	defer c.Close()
+	c.SetLoadBalancer(wrr)
+
+	_, _ = c.R().Get("/")
+
+	assertEqual(t, HostStateInActive, wrr.hosts[0].state)
+}
+
+func TestIsConnectionRefusedWrappedError(t *testing.T) {
+	err := fmt.Errorf("dial failed: %w", syscall.ECONNREFUSED)
+
+	assertTrue(t, isConnectionRefused(err))
+	assertFalse(t, isConnectionRefused(errors.New("dial failed")))
 }
 
 type mockTimeoutErr struct{}

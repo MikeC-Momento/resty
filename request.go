@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1866,7 +1867,7 @@ func (r *Request) sendLoadBalancerFeedback(res *Response, err error) {
 	if err != nil {
 		var noe *net.OpError
 		if errors.As(err, &noe) {
-			success = !errors.Is(noe.Err, syscall.ECONNREFUSED) || noe.Timeout()
+			success = !isConnectionRefused(noe.Err) || noe.Timeout()
 		}
 	}
 	if success && res != nil &&
@@ -1879,6 +1880,18 @@ func (r *Request) sendLoadBalancerFeedback(res *Response, err error) {
 		Success: success,
 		Attempt: r.Attempt,
 	})
+}
+
+const windowsWSAECONNREFUSED syscall.Errno = 10061
+
+func isConnectionRefused(err error) bool {
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+	if runtime.GOOS == "windows" && errors.Is(err, windowsWSAECONNREFUSED) {
+		return true
+	}
+	return false
 }
 
 func (r *Request) resetFileReaders() error {

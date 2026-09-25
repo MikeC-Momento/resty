@@ -2,7 +2,8 @@ name: mo-eval suite
 # Three modes, run in order:
 #   dry-run  mine and select only; prints the funnel. No validation, no model spend.
 #   build    mine and validate, then cache the suite. No model spend.
-#   run      restore the latest cached suite, drop tasks whose title matches `exclude`,
+#   run      restore the latest cached suite, keep tasks matching `include` minus those matching
+#            `exclude`,
 #            and run `arms` against the rest. This is the only mode that spends model budget.
 # Separate workflow runs rather than two Action calls in one job, because the Action uploads a
 # fixed-name artifact and a second upload in the same run would collide.
@@ -26,6 +27,9 @@ on:
       repeats:
         description: "run: times to run each arm, 1 to 5"
         default: "1"
+      include:
+        description: "run: keep only tasks whose title matches this regex (case-insensitive); empty keeps all"
+        default: "^(protect parseretryafterheader|digest challenge parsing|content-disposition values|add redirect header strip|return errreadernotseekable)"
       exclude:
         description: "run: drop tasks whose title matches this regex (case-insensitive); empty keeps all"
         default: ""
@@ -78,6 +82,7 @@ jobs:
       - name: Drop excluded tasks
         if: inputs.mode == 'run'
         env:
+          INCLUDE: ${{ inputs.include }}
           EXCLUDE: ${{ inputs.exclude }}
           RESTORED: ${{ steps.restore.outputs.cache-matched-key }}
         shell: python
@@ -85,18 +90,21 @@ jobs:
           import json, os, re, shutil, sys
           from pathlib import Path
           suite = Path(os.environ["SUITE"])
+          include = os.environ["INCLUDE"].strip()
           pattern = os.environ["EXCLUDE"].strip()
           kept, dropped = [], []
           for bundle in sorted(p for p in (suite / "local-suite").iterdir() if p.is_dir()):
               meta = suite / "tasks" / bundle.name / "meta.json"
               title = json.loads(meta.read_text()).get("title", bundle.name) if meta.is_file() else bundle.name
-              if pattern and re.search(pattern, title, re.IGNORECASE):
+              if (include and not re.search(include, title, re.IGNORECASE)) or (
+                  pattern and re.search(pattern, title, re.IGNORECASE)
+              ):
                   shutil.rmtree(bundle)
                   shutil.rmtree(suite / "tasks" / bundle.name, ignore_errors=True)
                   dropped.append(title)
               else:
                   kept.append(title)
-          lines = [f"### Suite `{os.environ['RESTORED']}`", f"exclude: `{pattern or '(none)'}`", "",
+          lines = [f"### Suite `{os.environ['RESTORED']}`", f"include: `{include or '(all)'}`", f"exclude: `{pattern or '(none)'}`", "",
                    f"**Running {len(kept)} task(s)**", *[f"- {t}" for t in kept], "",
                    f"**Dropped {len(dropped)}**", *[f"- {t}" for t in dropped]]
           text = "\n".join(lines)

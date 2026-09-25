@@ -33,12 +33,14 @@ permissions:
   contents: read
   pull-requests: read
   id-token: write   # the job authenticates to mo-eval as this repository; no secret to manage
-env:
-  SUITE: ${{ github.workspace }}/../mo-eval-suite
 jobs:
   suite:
     runs-on: ubuntu-latest
     steps:
+      # Outside the checkout, and absolute with no `..`: the Action's artifact upload refuses a
+      # path that contains one. `runner` is not available in workflow-level `env`, hence a step.
+      - name: Set the suite path
+        run: echo "SUITE=$RUNNER_TEMP/mo-eval-suite" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0

@@ -1,0 +1,113 @@
+name: mo-eval suite
+# Three modes, run in order:
+#   dry-run  mine and select only; prints the funnel. No validation, no model spend.
+#   build    mine and validate, then cache the suite. No model spend.
+#   run      restore the latest cached suite, drop tasks whose title matches `exclude`,
+#            and run `arms` against the rest. This is the only mode that spends model budget.
+# Separate workflow runs rather than two Action calls in one job, because the Action uploads a
+# fixed-name artifact and a second upload in the same run would collide.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: dry-run, build, or run
+        type: choice
+        options: [dry-run, build, run]
+        default: dry-run
+      candidates:
+        description: "build/dry-run: how many selected changes to validate (the Action's default is 12)"
+        default: "30"
+      arms:
+        description: "run: models to evaluate, space-separated"
+        default: "anthropic/claude-opus-5 momento/zai-org/GLM-5.3"
+      harnesses:
+        description: "run: coding-agent harnesses, space-separated (mo, cc, pi, strands, codex)"
+        default: "mo"
+      repeats:
+        description: "run: times to run each arm, 1 to 5"
+        default: "1"
+      exclude:
+        description: "run: drop tasks whose title matches this regex (case-insensitive); empty keeps all"
+        default: ""
+permissions:
+  contents: read
+  pull-requests: read
+  id-token: write   # the job authenticates to mo-eval as this repository; no secret to manage
+env:
+  SUITE: ${{ github.workspace }}/../mo-eval-suite
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # The job runs the repository's own historical tests; keep the forge token off disk.
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          # Match the worker image in .mo-eval/config.toml, not go.mod's minimum.
+          go-version: "1.27"
+
+      - name: Mine and validate
+        if: inputs.mode != 'run'
+        uses: momentohq/mo-eval-action@v1
+        with:
+          out: ${{ env.SUITE }}
+          arms: none
+          candidates: ${{ inputs.candidates }}
+          dry-run: ${{ inputs.mode == 'dry-run' }}
+      - name: Cache the suite
+        if: inputs.mode == 'build'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.SUITE }}
+          key: mo-eval-suite-${{ github.run_id }}
+
+      - name: Restore the latest suite
+        if: inputs.mode == 'run'
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.SUITE }}
+          key: mo-eval-suite-latest
+          restore-keys: mo-eval-suite-
+          fail-on-cache-miss: true
+      - name: Drop excluded tasks
+        if: inputs.mode == 'run'
+        env:
+          EXCLUDE: ${{ inputs.exclude }}
+          RESTORED: ${{ steps.restore.outputs.cache-matched-key }}
+        shell: python
+        run: |
+          import json, os, re, shutil, sys
+          from pathlib import Path
+          suite = Path(os.environ["SUITE"])
+          pattern = os.environ["EXCLUDE"].strip()
+          kept, dropped = [], []
+          for bundle in sorted(p for p in (suite / "local-suite").iterdir() if p.is_dir()):
+              meta = suite / "tasks" / bundle.name / "meta.json"
+              title = json.loads(meta.read_text()).get("title", bundle.name) if meta.is_file() else bundle.name
+              if pattern and re.search(pattern, title, re.IGNORECASE):
+                  shutil.rmtree(bundle)
+                  shutil.rmtree(suite / "tasks" / bundle.name, ignore_errors=True)
+                  dropped.append(title)
+              else:
+                  kept.append(title)
+          lines = [f"### Suite `{os.environ['RESTORED']}`", f"exclude: `{pattern or '(none)'}`", "",
+                   f"**Running {len(kept)} task(s)**", *[f"- {t}" for t in kept], "",
+                   f"**Dropped {len(dropped)}**", *[f"- {t}" for t in dropped]]
+          text = "\n".join(lines)
+          print(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(text + "\n")
+          if not kept:
+              sys.exit("exclude dropped every task; nothing to run")
+      - name: Run models
+        if: inputs.mode == 'run'
+        uses: momentohq/mo-eval-action@v1
+        with:
+          reuse-suite: ${{ env.SUITE }}
+          arms: ${{ inputs.arms }}
+          harnesses: ${{ inputs.harnesses }}
+          repeats: ${{ inputs.repeats }}
